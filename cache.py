@@ -1,8 +1,10 @@
 from __future__ import annotations
+
 import asyncio
 from datetime import datetime, timedelta, timezone
 
 import io
+import json
 from typing import Dict, TypedDict, NewType, TYPE_CHECKING
 
 from utils import json_load, json_save
@@ -37,8 +39,15 @@ class ImageCache:
     def __init__(self, manager: GUIManager) -> None:
         self._root = manager._root
         self._twitch = manager._twitch
+        cleanup: bool = False
         CACHE_PATH.mkdir(parents=True, exist_ok=True)
-        self._hashes: Hashes = json_load(CACHE_DB, default_database, merge=False)
+        try:
+            self._hashes: Hashes = json_load(CACHE_DB, default_database, merge=False)
+        except json.JSONDecodeError:
+            # if we can't load the mapping file, delete all existing files,
+            # then reinitialize the image cache anew
+            cleanup = True
+            self._hashes = default_database.copy()
         self._images: dict[ImageHash, Image] = {}
         self._photos: dict[tuple[ImageHash, ImageSize], PhotoImage] = {}
         self._lock = asyncio.Lock()
@@ -60,12 +69,13 @@ class ImageCache:
                 # hashes come with an extension already
                 CACHE_PATH.joinpath(img_hash).unlink(missing_ok=True)
                 # NOTE: The hashes are deleted from self._hashes above
-        # NOTE: This cleanups the cache folder from unused PNG files
-        # orphans = [
-        #     file.name for file in CACHE_PATH.glob("*.png") if file.name not in hash_counts
-        # ]
-        # for filename in orphans:
-        #     CACHE_PATH.joinpath(filename).unlink(missing_ok=True)
+        if cleanup:
+            # This cleanups the cache folder from unused PNG files
+            orphans = [
+                file.name for file in CACHE_PATH.glob("*.png") if file.name not in hash_counts
+            ]
+            for filename in orphans:
+                CACHE_PATH.joinpath(filename).unlink(missing_ok=True)
 
     def save(self, *, force: bool = False) -> None:
         if self._altered or force:
@@ -75,7 +85,9 @@ class ImageCache:
         return datetime.now(timezone.utc) + self.LIFETIME
 
     def _hash(self, image: Image) -> ImageHash:
-        pixel_data = list(image.resize((10, 10), Image_module.ANTIALIAS).convert('L').getdata())
+        pixel_data = list(
+            image.resize((10, 10), Image_module.Resampling.LANCZOS).convert('L').getdata()
+        )
         avg_pixel = sum(pixel_data) / len(pixel_data)
         bits = ''.join('1' if px >= avg_pixel else '0' for px in pixel_data)
         return ImageHash(f"{int(bits, 2):x}.png")
@@ -112,6 +124,6 @@ class ImageCache:
         if photo_key in self._photos:
             return self._photos[photo_key]
         if image.size != size:
-            image = image.resize(size, Image_module.ADAPTIVE)
+            image = image.resize(size, Image_module.Palette.ADAPTIVE)
         self._photos[photo_key] = photo = PhotoImage(master=self._root, image=image)
         return photo
